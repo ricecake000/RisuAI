@@ -4,6 +4,7 @@ import { SignatureV4 } from "@smithy/signature-v4"
 import { fetchNative, globalFetch, textifyReadableStream } from "src/ts/globalApi.svelte"
 import { LLMFormat } from "src/ts/model/modellist"
 import { registerClaudeObserver } from "src/ts/observer.svelte"
+import { updateCacheStats } from "src/ts/plugins/plugins"
 import { getDatabase } from "src/ts/storage/database.svelte"
 import { replaceAsync, simplifySchema, sleep } from "src/ts/util"
 import { v4 } from "uuid"
@@ -680,9 +681,9 @@ export async function requestClaude(arg:RequestDataArgumentExtended):Promise<req
 }
 
 async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:string}, body:any, arg:RequestDataArgumentExtended):Promise<requestDataResponse> {
-    
+
     if(arg.useStreaming){
-        
+
         const res = await fetchNative(replacerURL, {
             body: JSON.stringify(body),
             headers: headers,
@@ -699,6 +700,14 @@ async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:strin
         let breakError = ''
         let thinking = false
 
+        // Track cache stats during streaming
+        let streamCacheStats: {
+            cacheReadTokens?: number
+            cacheCreationTokens?: number
+            inputTokens?: number
+            outputTokens?: number
+        } = {}
+
         const stream = new ReadableStream<StreamResponseChunk>({
             async start(controller){
                 let text = ''
@@ -706,8 +715,23 @@ async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:strin
                 let parserData = ''
                 const decoder = new TextDecoder()
                 const parseEvent = (async (e:string) => {
-                    try {               
+                    try {
                         const parsedData = JSON.parse(e)
+
+                        // Capture cache stats from message_start event
+                        if(parsedData?.type === 'message_start' && parsedData?.message?.usage){
+                            const usage = parsedData.message.usage
+                            streamCacheStats.inputTokens = usage.input_tokens
+                            streamCacheStats.cacheReadTokens = usage.cache_read_input_tokens
+                            streamCacheStats.cacheCreationTokens = usage.cache_creation_input_tokens
+                        }
+
+                        // Capture output tokens from message_delta event
+                        if(parsedData?.type === 'message_delta' && parsedData?.usage){
+                            streamCacheStats.outputTokens = parsedData.usage.output_tokens
+                            // Update the global cache stats store
+                            updateCacheStats(streamCacheStats)
+                        }
 
                         if(parsedData?.type === 'content_block_delta'){
                             if(parsedData?.delta?.type === 'text' || parsedData.delta?.type === 'text_delta'){
@@ -717,7 +741,7 @@ async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:strin
                                 }
                                 text += parsedData.delta?.text ?? ''
                             }
-    
+
                             if(parsedData?.delta?.type === 'thinking' || parsedData.delta?.type === 'thinking_delta'){
                                 if(!thinking){
                                     text += "<Thoughts>\n"
@@ -725,7 +749,7 @@ async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:strin
                                 }
                                 text += parsedData.delta?.thinking ?? ''
                             }
-    
+
                             if(parsedData?.delta?.type === 'redacted_thinking'){
                                 if(!thinking){
                                     text += "<Thoughts>\n"
@@ -748,13 +772,13 @@ async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:strin
                             text += "Error:" + parsedData?.error?.message
 
                         }
-                        
+
                     }
                     catch (error) {
                     }
 
-                        
-                        
+
+
                 })
                 let breakWhile = false
                 let i = 0;
@@ -966,14 +990,28 @@ async function requestClaudeHTTP(replacerURL:string, headers:{[key:string]:strin
 
 
     arg.additionalOutput ??= ""
+
+    // Extract cache stats from usage
+    const cacheStats = res.data.usage ? {
+        cacheReadTokens: res.data.usage.cache_read_input_tokens,
+        cacheCreationTokens: res.data.usage.cache_creation_input_tokens,
+        inputTokens: res.data.usage.input_tokens,
+        outputTokens: res.data.usage.output_tokens
+    } : undefined
+
+    // Update the global cache stats store for plugins
+    updateCacheStats(cacheStats)
+
     if(arg.extractJson && db.jsonSchemaEnabled){
         return {
             type: 'success',
-            result: arg.additionalOutput + extractJSON(resText, db.jsonSchema)
+            result: arg.additionalOutput + extractJSON(resText, db.jsonSchema),
+            cache: cacheStats
         }
     }
     return {
         type: 'success',
-        result: arg.additionalOutput + resText
+        result: arg.additionalOutput + resText,
+        cache: cacheStats
     }
 }

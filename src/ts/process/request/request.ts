@@ -65,6 +65,13 @@ export interface RequestDataArgumentExtended extends requestDataArgument{
     additionalOutput?:string
 }
 
+export interface CacheStats {
+    cacheReadTokens?: number
+    cacheCreationTokens?: number
+    inputTokens?: number
+    outputTokens?: number
+}
+
 export type requestDataResponse = {
     type: 'success'|'fail'
     result: string
@@ -74,6 +81,7 @@ export type requestDataResponse = {
     },
     failByServerError?: boolean
     model?: string
+    cache?: CacheStats
 }|{
     type: "streaming",
     result: ReadableStream<StreamResponseChunk>,
@@ -81,6 +89,7 @@ export type requestDataResponse = {
         emotion?: string
     }
     model?: string
+    cache?: CacheStats
 }|{
     type: "multiline",
     result: ['user'|'char',string][],
@@ -88,6 +97,7 @@ export type requestDataResponse = {
         emotion?: string
     }
     model?: string
+    cache?: CacheStats
 }
 
 export interface StreamResponseChunk{[key:string]:string}

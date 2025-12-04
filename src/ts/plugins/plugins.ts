@@ -7,8 +7,19 @@ import type { OpenAIChat } from "../process/index.svelte";
 import { fetchNative, globalFetch } from "../globalApi.svelte";
 import { selectedCharID } from "../stores.svelte";
 import type { ScriptMode } from "../process/scripts";
+import type { CacheStats } from "../process/request/request";
 
 export const customProviderStore = writable([] as string[])
+
+// Store for latest cache stats from API responses
+export const latestCacheStats = writable<CacheStats | null>(null)
+
+// Function to update cache stats (called from request handlers)
+export function updateCacheStats(stats: CacheStats | undefined) {
+    if (stats && (stats.cacheReadTokens !== undefined || stats.cacheCreationTokens !== undefined)) {
+        latestCacheStats.set(stats)
+    }
+}
 
 
 interface ProviderPlugin {
@@ -298,6 +309,16 @@ export async function loadV2Plugin(plugins: RisuPlugin[]) {
                     plugin.realArg[realArg] = value;
                 }
             }
+        },
+        subscribeCacheStats: (callback: (stats: CacheStats) => void) => {
+            return latestCacheStats.subscribe((stats) => {
+                if (stats) {
+                    callback(stats)
+                }
+            })
+        },
+        getCacheStats: () => {
+            return get(latestCacheStats)
         }
     }
 
@@ -318,6 +339,8 @@ export async function loadV2Plugin(plugins: RisuPlugin[]) {
             const removeRisuReplacer = globalThis.__pluginApis__.removeRisuReplacer
             const onUnload = globalThis.__pluginApis__.onUnload
             const setArg = globalThis.__pluginApis__.setArg
+            const subscribeCacheStats = globalThis.__pluginApis__.subscribeCacheStats
+            const getCacheStats = globalThis.__pluginApis__.getCacheStats
 
             ${data}
         })();`
