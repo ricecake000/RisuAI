@@ -13,6 +13,7 @@ import { Capacitor } from "@capacitor/core"
 import { replaceAsync, simplifySchema } from "src/ts/util"
 import { callTool, decodeToolCall, encodeToolCall } from "../mcp/mcp"
 import { alertError, alertNormal, alertWait, showHypaV2Alert } from "src/ts/alert";
+import { updateCacheStats } from "src/ts/plugins/plugins"
 
 
 interface OAIResponseInputItem {
@@ -883,13 +884,24 @@ export async function requestHTTPOpenAI(replacerURL:string,body:any, headers:Rec
             }            
                     
             const result = processTextResponse(dat) ?? ''
-            
+
+            // Extract OpenAI cache stats from usage.prompt_tokens_details.cached_tokens
+            const cacheStats = dat.usage ? {
+                cacheReadTokens: dat.usage.prompt_tokens_details?.cached_tokens,
+                inputTokens: dat.usage.prompt_tokens,
+                outputTokens: dat.usage.completion_tokens
+            } : undefined
+
+            // Update the global cache stats store for plugins
+            updateCacheStats(cacheStats)
+
             return {
                 type: 'success',
-                result: result
+                result: result,
+                cache: cacheStats
             }
-            
-        } catch (error) {                    
+
+        } catch (error) {
             return {
                 type: 'fail',
                 result: (language.errors.httpError + `${JSON.stringify(dat)}`)
@@ -1115,6 +1127,13 @@ function getTranStream(arg:RequestDataArgumentExtended):TransformStream<Uint8Arr
     let reasoningContent = ""
     const db = getDatabase()
 
+    // Track cache stats during streaming
+    let streamCacheStats: {
+        cacheReadTokens?: number
+        inputTokens?: number
+        outputTokens?: number
+    } = {}
+
     return new TransformStream<Uint8Array, StreamResponseChunk>({
         async transform(chunk, control) {
             dataUint = Buffer.from(new Uint8Array([...dataUint, ...chunk]))
@@ -1127,6 +1146,10 @@ function getTranStream(arg:RequestDataArgumentExtended):TransformStream<Uint8Arr
                         try {
                             const rawChunk = data.replace("data: ", "")
                             if(rawChunk === "[DONE]"){
+                                // Update cache stats when stream completes
+                                if(streamCacheStats.cacheReadTokens !== undefined || streamCacheStats.inputTokens !== undefined) {
+                                    updateCacheStats(streamCacheStats)
+                                }
                                 if(arg.modelInfo.flags.includes(LLMFlags.deepSeekThinkingOutput)){
                                     readed["0"] = readed["0"].replace(/(.*)\<\/think\>/gms, (m, p1) => {
                                         reasoningContent = p1
@@ -1155,7 +1178,17 @@ function getTranStream(arg:RequestDataArgumentExtended):TransformStream<Uint8Arr
                                 }
                                 return
                             }
-                            const choices = JSON.parse(rawChunk).choices
+                            const parsedChunk = JSON.parse(rawChunk)
+
+                            // Capture usage data from streaming (OpenAI sends usage in final chunks)
+                            if(parsedChunk.usage) {
+                                streamCacheStats.inputTokens = parsedChunk.usage.prompt_tokens
+                                streamCacheStats.outputTokens = parsedChunk.usage.completion_tokens
+                                streamCacheStats.cacheReadTokens = parsedChunk.usage.prompt_tokens_details?.cached_tokens
+                            }
+
+                            const choices = parsedChunk.choices
+                            if(!choices) continue
                             for(const choice of choices){
                                 const chunk = choice.delta.content ?? choices.text
                                 if(chunk){

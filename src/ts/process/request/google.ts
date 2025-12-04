@@ -10,6 +10,7 @@ import { applyParameters, type Parameter, type RequestDataArgumentExtended, type
 import { callTool, decodeToolCall, encodeToolCall } from "../mcp/mcp"
 import { alertError, alertNormal, alertWait, showHypaV2Alert } from "src/ts/alert";
 import { addFetchLog } from "src/ts/globalApi.svelte"
+import { updateCacheStats } from "src/ts/plugins/plugins"
 
 type GeminiFunctionCall = {
     id?: string;
@@ -858,10 +859,22 @@ async function requestGoogle(url:string, body:any, headers:{[key:string]:string}
         }
     }
 
+    // Extract Google Gemini cache stats from usageMetadata
+    const usageData = Array.isArray(res.data) ? res.data[res.data.length - 1]?.usageMetadata : res.data?.usageMetadata
+    const cacheStats = usageData ? {
+        cacheReadTokens: usageData.cachedContentTokenCount,
+        inputTokens: usageData.promptTokenCount,
+        outputTokens: usageData.candidatesTokenCount
+    } : undefined
+
+    // Update the global cache stats store for plugins
+    updateCacheStats(cacheStats)
+
     console.log(result)
     return {
         type: 'success',
-        result: result
+        result: result,
+        cache: cacheStats
     }
 }
 
@@ -888,21 +901,41 @@ function initStreamState(state?: {[key:string]:string}): {[key:string]:string} {
 function getTranStream():TransformStream<Uint8Array, StreamResponseChunk> {
     let buffer = '';
 
+    // Track cache stats during streaming
+    let streamCacheStats: {
+        cacheReadTokens?: number
+        inputTokens?: number
+        outputTokens?: number
+    } = {}
+
     return new TransformStream<Uint8Array, StreamResponseChunk>({
         async transform(chunk, control) {
             buffer += new TextDecoder().decode(chunk);
             const lines = buffer.split('\n');
-            
+
             let readed = initStreamState();
 
             try {
                 for (const line of lines) {
                     if (line.startsWith('data: ')) {
                         const dataStr = line.slice(6).trim();
-                        if (dataStr === '[DONE]') return;
-                    
+                        if (dataStr === '[DONE]') {
+                            // Update cache stats when stream completes
+                            if(streamCacheStats.cacheReadTokens !== undefined || streamCacheStats.inputTokens !== undefined) {
+                                updateCacheStats(streamCacheStats)
+                            }
+                            return;
+                        }
+
                         const jsonData = JSON.parse(dataStr);
-                        
+
+                        // Capture usage metadata from streaming chunks (Gemini sends this in chunks)
+                        if (jsonData.usageMetadata) {
+                            streamCacheStats.inputTokens = jsonData.usageMetadata.promptTokenCount
+                            streamCacheStats.outputTokens = jsonData.usageMetadata.candidatesTokenCount
+                            streamCacheStats.cacheReadTokens = jsonData.usageMetadata.cachedContentTokenCount
+                        }
+
                         if (jsonData.candidates?.[0]?.content?.parts) {
                             const parts = jsonData.candidates[0].content.parts;
                             for (const part of parts) {
@@ -929,11 +962,17 @@ function getTranStream():TransformStream<Uint8Array, StreamResponseChunk> {
                                 }
                             }
                         }
-                    } 
+                    }
                 }
                 control.enqueue(readed)
-            } catch (error) { 
+            } catch (error) {
 
+            }
+        },
+        async flush() {
+            // Final update of cache stats when stream is fully consumed
+            if(streamCacheStats.cacheReadTokens !== undefined || streamCacheStats.inputTokens !== undefined) {
+                updateCacheStats(streamCacheStats)
             }
         }
     });
